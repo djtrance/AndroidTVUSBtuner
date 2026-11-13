@@ -70,6 +70,7 @@ class TvActivity : Activity() {
     private var transport: UsbTransport? = null
     private var siano: SianoDevice? = null
     private var t230: T230Device? = null
+    @Volatile private var currentUsbDevice: UsbDevice? = null
     @Volatile private var lastStats: SignalStats? = null
     @Volatile private var scanning = false
     @Volatile private var playerActive = false
@@ -79,7 +80,7 @@ class TvActivity : Activity() {
     private var lastRateBytes = 0L
     private var lastRateTime = 0L
 
-    private val mainHandler = Handler(mainLooper)
+    private val mainHandler by lazy { Handler(mainLooper) }
     private val usbPermissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val device = intent.usbDevice()
@@ -89,13 +90,27 @@ class TvActivity : Activity() {
         }
     }
 
+    private val usbDetachReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val detached = intent.usbDevice() ?: return
+            val current = currentUsbDevice ?: return
+            if (detached.deviceName == current.deviceName) {
+                stopReceiver("USB desconectado")
+            }
+        }
+    }
+
     private val statsThread = HandlerThread("tvusb-control").apply { start() }
     private val statsHandler by lazy { Handler(statsThread.looper) }
     private val statsPoll = object : Runnable {
         override fun run() {
             if (!scanning) {
-                siano?.requestStatistics()
-                t230?.requestStatistics()
+                try {
+                    siano?.requestStatistics()
+                    t230?.requestStatistics()
+                } catch (e: Throwable) {
+                    mainHandler.post { reportUsbFailure("stats USB: ${e.message}") }
+                }
             }
             statsHandler.postDelayed(this, 2500)
         }
@@ -136,6 +151,7 @@ class TvActivity : Activity() {
         t230?.stop()
         try {
             unregisterReceiver(usbPermissionReceiver)
+            unregisterReceiver(usbDetachReceiver)
         } catch (_: Throwable) {
         }
         super.onDestroy()
@@ -177,13 +193,13 @@ class TvActivity : Activity() {
         val openButton = button("Abrir receptor") { openFirstSupportedDevice() }
         val scanButton = button("Buscar canales") { scanChannels() }
         val stopButton = button("Detener") { stopPlayback() }
-        controls.addView(openButton)
-        controls.addView(scanButton)
-        controls.addView(stopButton)
+        addControl(controls, openButton)
+        addControl(controls, scanButton)
+        addControl(controls, stopButton)
         dvbBandControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(button("DVB 6 MHz") { setDvbBandwidth(6) })
-            addView(button("DVB 8 MHz") { setDvbBandwidth(8) })
+            addControl(this, button("DVB 6 MHz") { setDvbBandwidth(6) })
+            addControl(this, button("DVB 8 MHz") { setDvbBandwidth(8) })
             visibility = View.GONE
         }
         controls.addView(dvbBandControls)
@@ -240,7 +256,18 @@ class TvActivity : Activity() {
         text = label
         isFocusable = true
         isFocusableInTouchMode = true
+        setPadding(24, 14, 24, 14)
+        minHeight = 68
+        setBackgroundResource(R.drawable.tv_focus_button)
+        setTextColor(resources.getColorStateList(R.color.tv_button_text, theme))
         setOnClickListener { action() }
+    }
+
+    private fun addControl(parent: LinearLayout, view: View) {
+        parent.addView(view, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { marginEnd = 14 })
     }
 
     private fun handleUsbIntent(intent: Intent?) {
@@ -295,6 +322,7 @@ class TvActivity : Activity() {
         metadataParser = parser
         val tuner = SianoDevice(usb).apply {
             onLog = { appendLogFromReceiver(it) }
+            onTransportError = { error -> mainHandler.post { reportUsbFailure(error) } }
             onTs = { bytes, length ->
                 parser.feed(bytes, length)
                 byteCount.addAndGet(length.toLong())
@@ -316,6 +344,7 @@ class TvActivity : Activity() {
             }
         }
         transport = usb
+        currentUsbDevice = device
         siano = tuner
         playerActive = true
         hub.begin()
@@ -331,6 +360,7 @@ class TvActivity : Activity() {
                 appendLog("Error iniciando PT230: ${e.message}")
                 tuner.stop()
                 siano = null
+                currentUsbDevice = null
                 playerActive = false
             }
         }, "tvusb-start").start()
@@ -374,6 +404,7 @@ class TvActivity : Activity() {
             }
         }
         t230 = frontend
+        currentUsbDevice = device
         siano = null
         transport = null
         statusText.text = "Iniciando Si2168-B40 / Si2158-A20…"
@@ -390,6 +421,7 @@ class TvActivity : Activity() {
                 appendLog("Error inicializando DVB-T2: ${e.message}")
                 frontend.stop()
                 t230 = null
+                currentUsbDevice = null
             }
         }, "t230-start").start()
     }
@@ -463,7 +495,7 @@ class TvActivity : Activity() {
     }
 
     private fun renderPrograms() {
-        val selected = selectedProgram?.service?.programId
+        val selected = selectedProgram
         programList.removeAllViews()
         val snapshot = synchronized(programs) { programs.toList() }
             .distinctBy { "${it.channel}-${it.service.programId}" }
@@ -477,7 +509,9 @@ class TvActivity : Activity() {
             val row = button(label) { playProgram(entry) }
             row.textSize = 14f
             row.minHeight = 64
-            row.setBackgroundColor(if (entry.service.programId == selected) 0xff28536a.toInt() else 0xff1a2c38.toInt())
+            row.isSelected = selected?.let {
+                entry.channel == it.channel && entry.service.programId == it.service.programId
+            } == true
             programList.addView(row, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = 6
@@ -578,12 +612,46 @@ class TvActivity : Activity() {
 
     private fun registerUsbPermissionReceiver() {
         val filter = IntentFilter(ACTION_USB_PERMISSION)
+        val detachedFilter = IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(usbPermissionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(usbDetachReceiver, detachedFilter, Context.RECEIVER_EXPORTED)
         } else {
             @Suppress("DEPRECATION")
             registerReceiver(usbPermissionReceiver, filter)
+            @Suppress("DEPRECATION")
+            registerReceiver(usbDetachReceiver, detachedFilter)
         }
+    }
+
+    private fun reportUsbFailure(message: String) {
+        appendLog("USB: $message")
+        statusText.text = "Receptor USB perdido · revisa cable/alimentación"
+        signalText.text = "Sin conexión USB"
+        stopReceiver(null)
+    }
+
+    private fun stopReceiver(message: String?) {
+        scanning = false
+        scanThread?.interrupt()
+        scanThread = null
+        playerActive = false
+        hub.finish()
+        player.pause()
+        player.stop()
+        player.clearMediaItems()
+        lastStats = null
+        val oldSiano = siano
+        val oldT230 = t230
+        siano = null
+        t230 = null
+        transport = null
+        currentUsbDevice = null
+        Thread({
+            try { oldSiano?.stop() } catch (_: Throwable) { }
+            try { oldT230?.stop() } catch (_: Throwable) { }
+        }, "tvusb-stop").start()
+        if (message != null) statusText.text = message
     }
 
     private fun loadFirmware(): ByteArray? = try {

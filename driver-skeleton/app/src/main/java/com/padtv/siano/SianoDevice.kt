@@ -33,6 +33,9 @@ class SianoDevice(private val transport: UsbTransport) {
     /** Linea de log para la UI. */
     var onLog: ((String) -> Unit)? = null
 
+    /** Error de control USB (normalmente desconexión del dongle). */
+    var onTransportError: ((String) -> Unit)? = null
+
     /** Respuestas de control (no-TS) para esperar ACKs. */
     private data class ControlMsg(val type: Int, val payload: ByteArray, val length: Int)
 
@@ -124,14 +127,22 @@ class SianoDevice(private val transport: UsbTransport) {
 
     private fun send(msg: ByteArray, tag: String) {
         val rc = transport.bulkOut(msg)
-        if (rc < 0) log("$tag: bulk OUT fallo rc=$rc") else log("$tag: $rc bytes")
+        if (rc < 0) {
+            val error = "$tag: bulk OUT fallo rc=$rc"
+            log(error)
+            onTransportError?.invoke(error)
+        } else {
+            log("$tag: $rc bytes")
+        }
     }
 
     /** Envia y espera una respuesta concreta (como smscore_sendrequest_and_wait). */
     private fun sendWait(msg: ByteArray, expect: Int, timeoutMs: Long = 1500): Boolean {
         controlQueue.clear()
         if (transport.bulkOut(msg) < 0) {
-            log("sendWait: bulk OUT fallo (esperaba $expect)")
+            val error = "bulk OUT falló (esperaba $expect)"
+            log("sendWait: $error")
+            onTransportError?.invoke(error)
             return false
         }
         val deadline = System.currentTimeMillis() + timeoutMs
