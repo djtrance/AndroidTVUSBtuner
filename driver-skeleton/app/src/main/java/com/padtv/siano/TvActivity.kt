@@ -77,6 +77,7 @@ class TvActivity : Activity() {
     private var scanThread: Thread? = null
     private var selectedProgram: ProgramEntry? = null
     private var dvbBandwidthMHz = 8
+    @Volatile private var scanLockedChannels = 0
     private var lastRateBytes = 0L
     private var lastRateTime = 0L
 
@@ -337,6 +338,10 @@ class TvActivity : Activity() {
                         rssi = le32(payload, 0x1c),
                         inBand = le32(payload, 0x20),
                     )
+                } else if (type == 828) {
+                    runOnUiThread { statusText.text = "Sin señal demodulada · revisa antena" }
+                } else if (type == 827) {
+                    runOnUiThread { statusText.text = "Señal RF detectada · esperando lock" }
                 }
                 if (type == SianoDevice.MSG_GET_VERSION_EX_RES && length >= 8) {
                     appendLog("Siano chip=0x%04x fw=0x%04x".format(le32(payload, 0), le32(payload, 4)))
@@ -437,6 +442,7 @@ class TvActivity : Activity() {
         val dvbT2 = tuner == null
         if (scanning) return
         scanning = true
+        scanLockedChannels = 0
         playerActive = false
         player.pause()
         player.stop()
@@ -467,7 +473,7 @@ class TvActivity : Activity() {
                     // permite descubrir servicios y first/following EPG.
                     Thread.sleep(2300)
                     if (dvbT2) t230?.requestStatistics() else tuner?.requestStatistics()
-                    Thread.sleep(250)
+                    Thread.sleep(500)
                 } catch (_: InterruptedException) {
                     break
                 } catch (e: Throwable) {
@@ -475,6 +481,7 @@ class TvActivity : Activity() {
                 }
                 val stats = lastStats
                 val found = parser.snapshot().filter { it.videoPid >= 0 }
+                if (stats?.demodLock == 1) scanLockedChannels++
                 if ((stats?.demodLock == 1 || found.isNotEmpty()) && found.isNotEmpty()) {
                     synchronized(programs) {
                         found.forEach { service -> programs.add(ProgramEntry(channel, frequency, if (dvbT2) dvbBandwidthMHz else 6, service, stats, !dvbT2)) }
@@ -482,14 +489,19 @@ class TvActivity : Activity() {
                     runOnUiThread { renderPrograms() }
                 }
                 runOnUiThread {
-                    scanProgressText.text = "${if (dvbT2) "DVB-T2" else "ISDB-T"} $channel · ${found.size} servicios con video"
+                    val lock = if (stats?.demodLock == 1) "demod lock · SNR ${stats.snr} dB" else "sin demod lock"
+                    scanProgressText.text = "${if (dvbT2) "DVB-T2" else "ISDB-T"} $channel · $lock · ${found.size} video"
                 }
             }
             scanning = false
             playerActive = false
             runOnUiThread {
-            scanProgressText.text = "Escaneo listo · ${programs.size} servicios de video"
-                statusText.text = "Elige un servicio de la lista"
+                scanProgressText.text = "Escaneo listo · ${programs.size} servicios de video · $scanLockedChannels canales con lock"
+                statusText.text = when {
+                    programs.isNotEmpty() -> "Elige un servicio de la lista"
+                    scanLockedChannels == 0 -> "Sin demod lock · revisa antena y conexión RF"
+                    else -> "Hay lock pero no se identificaron servicios de video"
+                }
             }
         }, "tvusb-scan").also { it.start() }
     }
@@ -579,7 +591,7 @@ class TvActivity : Activity() {
             val kbps = (total - lastRateBytes) * 8 / (now - lastRateTime)
             val stats = lastStats
             val signal = stats?.let {
-                "RF ${if (it.rfLock == 1) "lock" else "—"} · Demod ${if (it.demodLock == 1) "lock" else "—"} · SNR ${it.snr} dB · RSSI ${it.rssi} dBm"
+                "RF ${if (it.rfLock == 1) "lock" else "—"} · Demod ${if (it.demodLock == 1) "lock" else "—"} · SNR ${it.snr} dB · RSSI ${it.rssi} dBm · banda ${it.inBand} dBm"
             } ?: "Señal: midiendo…"
             runOnUiThread { signalText.text = "$signal · $kbps kbps · ${total / 1024} KiB" }
         }
