@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  IDs de los dos receptores soportados por TV USB. Se declaran en decimal.
+  Los IDs Siano PT230 también aparecen en PadTV HD; el C688 usa el backend
+  RD213/T230 implementado para DVB-T2.
+
+  Confirmado en hardware real:
+    1f4d:a230 -> MyGica PT230, Siano SMS2270 "Rio", ISDB-T 1seg.
+                 chip_model=0x2270, fw "ISDBT 07.03.58.0 RIO".
+                 (device_filter.xml de PadTV solo trae a270; el a230 se
+                  detecta igual porque el .so no filtra por PID)
+-->
+<resources>
+    <usb-device vendor-id="8013" product-id="41520" />  <!-- 1f4d:a230 PT230 real -->
+    <usb-device vendor-id="8013" product-id="41584" />  <!-- 1f4d:a270 variante -->
+    <usb-device vendor-id="12917" product-id="128" />   <!-- 3275:0080 PLEX PX-S1UD -->
+    <usb-device vendor-id="1394" product-id="50824" />  <!-- 0572:c688 T230/RD213 DVB-T2 -->
+</resources>

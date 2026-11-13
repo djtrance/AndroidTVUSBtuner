@@ -1,0 +1,21 @@
+# OS / IDE / build output
+.DS_Store
+.idea/
+*.iml
+.gradle/
+**/build/
+**/.externalNativeBuild/
+**/.cxx/
+local.properties
+
+# Original APKs and decompiled analysis are research inputs, not project sources.
+/apk/
+/analysis/
+
+# Vendor firmware blobs are deliberately kept out of the public source repo.
+/fw/
+/driver-skeleton/app/src/main/assets/*.inp
+/driver-skeleton/app/src/main/assets/*.fw
+
+# Local test captures / tuner recordings
+*.ts
